@@ -415,6 +415,7 @@ dependencies = [
  "derive",
  "fs",
  "futures 0.3.30",
+ "http",
  "linked_hash_set",
  "reqwest",
  "scraper",

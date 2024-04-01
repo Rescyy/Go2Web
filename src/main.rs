@@ -5,12 +5,7 @@ use reqwest::
 use scraper::{ElementRef, Html};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{hash_map::DefaultHasher, HashSet},
-    env,
-    fs::File,
-    hash::Hasher,
-    io::{Read, Write},
-    path::Path,
+    collections::{hash_map::DefaultHasher, HashSet}, env, fs::File, hash::Hasher, io::{Read, Write}, net::{SocketAddr, TcpStream}, path::Path
 };
 
 // https://gist.github.com/strdr4605/b5c97f5268c56e01c1ee9ed9cba76abb
@@ -130,6 +125,32 @@ impl CacheDirectory {
 }
 
 async fn get_request(url: &String, cache: &mut Option<CacheDirectory>) {
+
+    let uri = url.parse::<http::Uri>().unwrap();
+    dbg!(&uri);
+    let authority = uri.authority().unwrap().as_str();
+    let ip_port = format!("{}:{}", authority, 80);
+    dbg!(&ip_port);
+    let mut tcp_stream = TcpStream::connect(ip_port).expect("Couldn't connect");
+
+    // let request_body = format!("GET {} HTTP/1.1\r\n", uri.path_and_query().unwrap().as_str()) +
+    // &format!("Host: {}\r\n", uri.host().unwrap().to_string()) +
+    // // "User-Agent: go2web-client/1.0\r\n" +
+    // "Accept: text/html,application/json\r\n" +
+    // // "Connection: keep-alive\r\n" +
+    // "\r\n";
+    let request_body = "GET /pub/WWW/TheProject.html HTTP/1.1\r\n".to_owned() +
+    "Host: www.w3.org\r\n\r\n";
+    println!("{}", &request_body);
+
+    tcp_stream.write(request_body.as_bytes()).expect("Error Sending");
+
+    let mut response = String::new();
+    tcp_stream.read_to_string(&mut response).expect("Error reading");
+    dbg!(response);
+
+    return;
+
     let client = reqwest::Client::new();
     let response = client
         .get(url)
@@ -232,13 +253,6 @@ async fn get_request(url: &String, cache: &mut Option<CacheDirectory>) {
 }
 
 async fn display_url(url: &String, cache: &mut Option<CacheDirectory>) {
-    let url = {
-        if !url.starts_with("https://") {
-            "https://".to_owned() + &url
-        } else {
-            url.to_owned()
-        }
-    };
     println!("Accessing {}", url);
     match cache {
         Some(unrwapped_cache) => {

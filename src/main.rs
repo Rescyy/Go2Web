@@ -1,10 +1,17 @@
 use futures::executor::block_on;
-use linked_hash_set::LinkedHashSet;
-use reqwest::redirect::Policy;
-use scraper::{node::Element, ElementRef, Html};
+use reqwest::
+    header::{ACCEPT, USER_AGENT}
+;
+use scraper::{ElementRef, Html};
 use serde::{Deserialize, Serialize};
-use std::{collections::{hash_map::DefaultHasher, HashSet}, env, error::Error, fs::File, hash::{Hash, Hasher}, io::{Read, Write}, path::Path, process::exit};
-use serde::Serializer;
+use std::{
+    collections::{hash_map::DefaultHasher, HashSet},
+    env,
+    fs::File,
+    hash::Hasher,
+    io::{Read, Write},
+    path::Path,
+};
 
 // https://gist.github.com/strdr4605/b5c97f5268c56e01c1ee9ed9cba76abb
 
@@ -77,25 +84,17 @@ struct CacheDirectory {
 impl CacheDirectory {
     fn new(directory_path: String) -> Option<Self> {
         if Path::new(&directory_path).exists() {
-            Some(CacheDirectory {
-                directory_path,
-            })
+            Some(CacheDirectory { directory_path })
         } else {
             match std::fs::create_dir(&directory_path) {
-                Ok(_) => {
-                    Some(CacheDirectory {
-                        directory_path,
-                    })
-                }
-                Err(_) => {
-                    None
-                }
+                Ok(_) => Some(CacheDirectory { directory_path }),
+                Err(_) => None,
             }
         }
     }
 
     fn store_cache(&mut self, url: &String, content: &String) -> Result<(), std::io::Error> {
-        println!("{url} {}", url.len());
+        // println!("{url} {}", url.len());
         let mut hasher = DefaultHasher::new();
         hasher.write(url.as_bytes());
         let hash_result = hasher.finish();
@@ -107,7 +106,7 @@ impl CacheDirectory {
     }
 
     fn get_cache(&mut self, url: &String) -> Option<String> {
-        println!("{url} {}", url.len());
+        // println!("{url} {}", url.len());
         let mut hasher = DefaultHasher::new();
         hasher.write(url.as_bytes());
         let hash_result = hasher.finish();
@@ -115,44 +114,66 @@ impl CacheDirectory {
         let mut file = match File::open(Path::new(&file_path)) {
             Ok(file) => file,
             _ => {
-                println!("Can't open cache file {file_path}");
-                return None
+                // println!("Can't open cache file {file_path}");
+                return None;
             }
         };
         let mut content = String::new();
         match file.read_to_string(&mut content) {
             Err(_) => {
                 println!("Failed to read cache file");
-                return None
-            },
+                return None;
+            }
             _ => return Some(content),
         }
     }
 }
 
 async fn get_request(url: &String, cache: &mut Option<CacheDirectory>) {
-    let body = reqwest::get(url)
-    .await
-    .expect("Request timed out")
-    .text()
-    .await
-    .expect("Failed to parse the response");
+    let client = reqwest::Client::new();
+    let response = client
+        .get(url)
+        .header(USER_AGENT, "My Rust Program 1.0")
+        .header(ACCEPT, "text/html, application/json")
+        .send()
+        .await
+        .expect("Error");
 
-    let html = scraper::Html::parse_document(&body);
-    let tags: HashSet<&str> = HashSet::from_iter(
-        vec![
-            "h1", "h2", "h3", "h4", "h5", "h6", "span", "p", "img", "a", "button",
-        ]
-        .into_iter(),
-    );
+    let body = response.text().await.expect("Failed to parse the response");
 
-    let element_vector = query_html(&html, tags);
-    let mut html_text_builder: StringBuilder = StringBuilder::new();
-    for element_ref in element_vector.iter() {
-        let element = element_ref.value();
-        match element.name() {
-            "a" => {
-                match element.attr("href") {
+    let response = client
+        .get(url)
+        .header(USER_AGENT, "My Rust Program 1.0")
+        .header(ACCEPT, "text/html, application/json")
+        .send()
+        .await
+        .expect("Error");
+
+    let headers = response.headers();
+    let mut json_type = false;
+    if let Some(header_value) = headers.get("content-type") {
+        let header_value = std::str::from_utf8(header_value.as_bytes()).unwrap();
+        if header_value.contains("application/json") {
+            json_type = true;
+        }
+        
+    }
+
+    if !json_type {
+        let html = scraper::Html::parse_document(&body);
+        let tags: HashSet<&str> = HashSet::from_iter(
+            vec![
+                "h1", "h2", "h3", "h4", "h5", "h6", "span", "p", "img", "a", "button",
+            ]
+            .into_iter(),
+        );
+    
+        let element_vector = query_html(&html, tags);
+        let mut html_text_builder: StringBuilder = StringBuilder::new();
+        for element_ref in element_vector.iter() {
+            let element = element_ref.value();
+            match element.name() {
+                "a" => match element.attr("href") {
                     Some(link) => {
                         let _name = {
                             let mut name: String = String::new();
@@ -165,36 +186,49 @@ async fn get_request(url: &String, cache: &mut Option<CacheDirectory>) {
                             }
                             name
                         };
-                        html_text_builder.append_line(format!("Link: {_name} \"{}\"", validate_link(&url, link)).as_str());
-                    },
+                        html_text_builder.append_line(
+                            format!("Link: {_name} \"{}\"", validate_link(&url, link)).as_str(),
+                        );
+                    }
                     None => (),
-                }
-            },
-            "img" => {
-                match element.attr("src") {
+                },
+                "img" => match element.attr("src") {
                     Some(link) => {
-                        html_text_builder.append_line(format!("Image: \"{}\"", validate_link(&url, link)).as_str());
-                    },
+                        html_text_builder
+                            .append_line(format!("Image: \"{}\"", validate_link(&url, link)).as_str());
+                    }
                     None => (),
-                }
-            },
-            _name => {
-                for element_text in element_ref.text() {
-                    let element_text = element_text.trim();
-                    html_text_builder.append_line(element_text);
+                },
+                _name => {
+                    for element_text in element_ref.text() {
+                        let element_text = element_text.trim();
+                        html_text_builder.append_line(element_text);
+                    }
                 }
             }
         }
+    
+        let html_text = html_text_builder.get_string();
+        match cache {
+            Some(cache) => {
+                cache
+                    .store_cache(url, &html_text)
+                    .expect("Failed to store cache");
+            }
+            None => (),
+        }
+        println!("{}", html_text);
+    } else {
+        match cache {
+            Some(cache) => {
+                cache
+                    .store_cache(url, &body)
+                    .expect("Failed to store cache");
+            }
+            None => (),
+        }
+        println!("{}", body);
     }
-
-    let html_text = html_text_builder.get_string();
-    match cache {
-        Some(cache) => {
-            cache.store_cache(url, &html_text).expect("Failed to store cache");
-        },
-        None => (),
-    }
-    println!("{}", html_text);
 }
 
 async fn display_url(url: &String, cache: &mut Option<CacheDirectory>) {
@@ -211,18 +245,17 @@ async fn display_url(url: &String, cache: &mut Option<CacheDirectory>) {
             println!("Cache directory present");
             match unrwapped_cache.get_cache(&url) {
                 Some(content) => {
-                    println!("Retrieving cached data:\n{}", content);
-                },
+                    println!("Retrieving cached data\n{}", content);
+                }
                 None => {
                     get_request(&url, cache).await;
                 }
             }
-        },
+        }
         None => {
             get_request(&url, cache).await;
-        },
+        }
     }
-    
 }
 
 #[derive(Serialize, Deserialize)]
@@ -232,21 +265,12 @@ const JSON_RESULTS_PATH: &'static str = "cache/search_results.json";
 
 async fn search_url(search_text: &String) {
     let url = "https://google.com/search?q=".to_string() + search_text;
-    let body = reqwest::get(url)
-        .await
-        .expect("Request timed out")
-        .text()
-        .await
-        .expect("Failed to parse the response");
+    let response = reqwest::get(url).await.expect("Request timed out");
 
+    let body = response.text().await.expect("Failed to parse the response");
     // println!("{}", body);
     let html = scraper::Html::parse_document(&body);
-    let tags: HashSet<&str> = HashSet::from_iter(
-        vec![
-            "a",
-        ]
-        .into_iter(),
-    );
+    let tags: HashSet<&str> = HashSet::from_iter(vec!["a"].into_iter());
     let element_vector = query_html(&html, tags);
     let mut search_results: Vec<(String, String)> = Vec::new();
     let google = "https://www.google.com".to_string();
@@ -260,40 +284,47 @@ async fn search_url(search_text: &String) {
                     }
                     search_results.push((validate_link(&google, link), text));
                 }
-            },
+            }
             _ => (),
         }
         if search_results.len() == 10 {
             break;
         }
     }
-    let mut link_results: LinkResults = LinkResults(
-        vec![],
-    );
+    let mut link_results: LinkResults = LinkResults(vec![]);
     for i in 0..search_results.len() {
         let (link, description) = search_results.get(i).unwrap();
         link_results.0.push(link.clone());
-        println!("{}. {}\nLink: {}\n", i+1, description, link);
+        println!("{}. {}\nLink: {}\n", i + 1, description, link);
     }
     let mut json_file = File::create(Path::new(JSON_RESULTS_PATH)).unwrap();
     let json: String = serde_json::to_string(&link_results).unwrap();
-    json_file.write(json.as_bytes()).expect("Cannot save results in json file.");
-
+    json_file
+        .write(json.as_bytes())
+        .expect("Cannot save results in json file.");
 }
 
 async fn get_previous(index: usize, cache: &mut Option<CacheDirectory>) {
-    let mut json_file = File::open(Path::new(JSON_RESULTS_PATH)).expect("No previous search results found");
+    let mut json_file =
+        File::open(Path::new(JSON_RESULTS_PATH)).expect("No previous search results found");
     let mut json: String = String::new();
-    json_file.read_to_string(&mut json).expect("Can't read from the search results file for some reason.");
-    let link_results = serde_json::from_str::<LinkResults>(&json).expect("Search results json file corrupted");
+    json_file
+        .read_to_string(&mut json)
+        .expect("Can't read from the search results file for some reason.");
+    let link_results =
+        serde_json::from_str::<LinkResults>(&json).expect("Search results json file corrupted");
     let link_results = link_results.0;
-    let link = link_results.get(index).expect("No link results with such index found");
+    let link = link_results
+        .get(index)
+        .expect("No link results with such index found");
     display_url(link, cache).await;
 }
 
-const HELP_MESSAGE: &'static str = "go2web -u <URL>         # make an HTTP request to the specified URL and print the response
-go2web -s <search-term> # make an HTTP request to search the term using your favorite search engine and print top 10 results
-go2web -h               # show this help";
+const HELP_MESSAGE: &'static str = 
+"go2web -u <URL>                 # make an HTTP request to the specified URL and print the response
+go2web -s <search-term>         # make an HTTP request to search the term using your favorite search engine and print top 10 results
+go2web -p <search-result-index> # same as go2web -u <search-result-selected-link>
+go2web -h                       # show this help";
 
 #[tokio::main]
 async fn main() {
@@ -320,8 +351,16 @@ async fn main() {
             block_on(future);
         }
         "-p" => {
-            let search_text = args.get(2).expect("Index of the search result expected after -p");
-            let future = get_previous(search_text.trim().parse::<usize>().expect(format!("Number expected, found {}", search_text).as_str()), &mut cache);
+            let search_text = args
+                .get(2)
+                .expect("Index of the search result expected after -p");
+            let future = get_previous(
+                search_text
+                    .trim()
+                    .parse::<usize>()
+                    .expect(format!("Number expected, found {}", search_text).as_str()),
+                &mut cache,
+            );
             block_on(future);
         }
         invalid_input => {

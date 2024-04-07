@@ -1,12 +1,18 @@
 use futures::executor::block_on;
-use reqwest::
-    header::{ACCEPT, USER_AGENT}
-;
+use reqwest::header::{ACCEPT, USER_AGENT};
 use scraper::{ElementRef, Html};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{hash_map::DefaultHasher, HashSet}, env, fs::File, hash::Hasher, io::{Read, Write}, net::{SocketAddr, TcpStream}, path::Path
+    collections::{hash_map::DefaultHasher, HashSet},
+    env,
+    error::Error,
+    fs::File,
+    hash::Hasher,
+    io::{Read, Write},
+    net::TcpStream,
+    path::Path,
 };
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 // https://gist.github.com/strdr4605/b5c97f5268c56e01c1ee9ed9cba76abb
 
@@ -88,7 +94,11 @@ impl CacheDirectory {
         }
     }
 
-    fn store_cache(&mut self, url: &String, content: &String) -> Result<(), std::io::Error> {
+    fn store_cache<T: ToString>(
+        &mut self,
+        url: &String,
+        content: &T,
+    ) -> Result<(), std::io::Error> {
         // println!("{url} {}", url.len());
         let mut hasher = DefaultHasher::new();
         hasher.write(url.as_bytes());
@@ -96,7 +106,7 @@ impl CacheDirectory {
         let file_path = format!("{}/{:x}.txt", self.directory_path, hash_result);
         println!("Created cache file {file_path}");
         let mut file = File::create(Path::new(&file_path))?;
-        file.write(content.as_bytes())?;
+        file.write(content.to_string().as_bytes())?;
         Ok(())
     }
 
@@ -124,151 +134,255 @@ impl CacheDirectory {
     }
 }
 
-async fn get_request(url: &String, cache: &mut Option<CacheDirectory>) {
+fn write_request(stream: &mut dyn Write, host: &str, path: &str) -> Result<(), Box<dyn Error>> {
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nUser-Agent: go2web-client\r\nAccept: text/html, application/json; charset=utf-8\r\nAccept-Language: en-US\r\nCache-Control: no-cache; max-age=0\r\n\r\n",
+        path, host
+    );
+    stream.write_all(request.as_bytes())?;
+    Ok(())
+}
 
-    let uri = url.parse::<http::Uri>().unwrap();
-    dbg!(&uri);
-    let authority = uri.authority().unwrap().as_str();
-    let ip_port = format!("{}:{}", authority, 80);
-    dbg!(&ip_port);
-    let mut tcp_stream = TcpStream::connect(ip_port).expect("Couldn't connect");
-
-    // let request_body = format!("GET {} HTTP/1.1\r\n", uri.path_and_query().unwrap().as_str()) +
-    // &format!("Host: {}\r\n", uri.host().unwrap().to_string()) +
-    // // "User-Agent: go2web-client/1.0\r\n" +
-    // "Accept: text/html,application/json\r\n" +
-    // // "Connection: keep-alive\r\n" +
-    // "\r\n";
-    let request_body = "GET /pub/WWW/TheProject.html HTTP/1.1\r\n".to_owned() +
-    "Host: www.w3.org\r\n\r\n";
-    println!("{}", &request_body);
-
-    tcp_stream.write(request_body.as_bytes()).expect("Error Sending");
-
+fn read_response(stream: &mut dyn Read) -> Result<String, Box<dyn Error>> {
     let mut response = String::new();
-    tcp_stream.read_to_string(&mut response).expect("Error reading");
-    dbg!(response);
+    let mut buf: [u8; 1] = [0];
 
-    return;
-
-    let client = reqwest::Client::new();
-    let response = client
-        .get(url)
-        .header(USER_AGENT, "My Rust Program 1.0")
-        .header(ACCEPT, "text/html, application/json")
-        .send()
-        .await
-        .expect("Error");
-
-    let body = response.text().await.expect("Failed to parse the response");
-
-    let response = client
-        .get(url)
-        .header(USER_AGENT, "My Rust Program 1.0")
-        .header(ACCEPT, "text/html, application/json")
-        .send()
-        .await
-        .expect("Error");
-
-    let headers = response.headers();
-    let mut json_type = false;
-    if let Some(header_value) = headers.get("content-type") {
-        let header_value = std::str::from_utf8(header_value.as_bytes()).unwrap();
-        if header_value.contains("application/json") {
-            json_type = true;
-        }
-        
-    }
-
-    if !json_type {
-        let html = scraper::Html::parse_document(&body);
-        let tags: HashSet<&str> = HashSet::from_iter(
-            vec![
-                "h1", "h2", "h3", "h4", "h5", "h6", "span", "p", "img", "a", "button",
-            ]
-            .into_iter(),
-        );
-    
-        let element_vector = query_html(&html, tags);
-        let mut html_text_builder: StringBuilder = StringBuilder::new();
-        for element_ref in element_vector.iter() {
-            let element = element_ref.value();
-            match element.name() {
-                "a" => match element.attr("href") {
-                    Some(link) => {
-                        let _name = {
-                            let mut name: String = String::new();
-                            for element_text in element_ref.text() {
-                                let element_text = element_text.trim();
-                                name.push_str(element_text);
-                            }
-                            if name.len() != 0 {
-                                name = "(".to_owned() + &name + ")";
-                            }
-                            name
-                        };
-                        html_text_builder.append_line(
-                            format!("Link: {_name} \"{}\"", validate_link(&url, link)).as_str(),
-                        );
-                    }
-                    None => (),
-                },
-                "img" => match element.attr("src") {
-                    Some(link) => {
-                        html_text_builder
-                            .append_line(format!("Image: \"{}\"", validate_link(&url, link)).as_str());
-                    }
-                    None => (),
-                },
-                _name => {
-                    for element_text in element_ref.text() {
-                        let element_text = element_text.trim();
-                        html_text_builder.append_line(element_text);
-                    }
-                }
-            }
-        }
-    
-        let html_text = html_text_builder.get_string();
-        match cache {
-            Some(cache) => {
-                cache
-                    .store_cache(url, &html_text)
-                    .expect("Failed to store cache");
-            }
-            None => (),
-        }
-        println!("{}", html_text);
+    let result = stream.read_to_string(&mut response);
+    if let Ok(_) = result {
+        return Ok(response);
     } else {
-        match cache {
-            Some(cache) => {
-                cache
-                    .store_cache(url, &body)
-                    .expect("Failed to store cache");
+        response.clear();
+        println!("utf-8 problem");
+        loop {
+            match stream.read_exact(&mut buf) {
+                Err(_err) => {
+                    break;
+                },
+                _ => (),
             }
-            None => (),
+
+            response.push(char::from_u32(buf[0] as u32).unwrap());
+            // dbg!(&response);
         }
-        println!("{}", body);
+        Ok(response)
     }
 }
 
-async fn display_url(url: &String, cache: &mut Option<CacheDirectory>) {
+fn get_request(arg_url: &String) -> Option<(String, bool)> {
+    const MAX_REDIRECTIONS: u8 = 10;
+
+    let mut url = if !arg_url.starts_with("https") {
+        if arg_url.starts_with("www") {
+            "https://".to_owned() + arg_url
+        } else {
+            "https://www.".to_owned() + arg_url
+        }
+    } else {
+        arg_url.to_owned()
+    };
+    let mut redirections = 0;
+
+    let mut response_buffer;
+    let (response_body, json_type) = 'redirect_loop: loop {
+        let parsed_url = url::Url::parse(&url).expect("Wrong URL syntax");
+        let host = parsed_url.host_str().ok_or("Missing host").unwrap();
+        println!("{host}");
+        let scheme = parsed_url.scheme();
+        let port = parsed_url.port_or_known_default().unwrap();
+        let addr = format!("{}:{}", host, port);
+        let path = if parsed_url.path().is_empty() {
+            "/"
+        } else {
+            parsed_url.path()
+        };
+        response_buffer = if parsed_url.scheme() == "https" {
+            let mut builder = native_tls::TlsConnector::builder();
+            builder.danger_accept_invalid_certs(true);
+            let connector = builder.build().unwrap();
+            let stream = TcpStream::connect(&addr).unwrap();
+            let mut stream = connector.connect(host, stream).unwrap();
+            println!("URL: {url}");
+
+            write_request(&mut stream, host, path).unwrap();
+            read_response(&mut stream).unwrap()
+        } else {
+            let mut stream = TcpStream::connect(&addr).unwrap();
+            write_request(&mut stream, host, path).unwrap();
+            read_response(&mut stream).unwrap()
+        };
+        dbg!(&response_buffer);
+        let mut headers = [httparse::EMPTY_HEADER; 64];
+        let mut inter_response_info;
+        inter_response_info = httparse::Response::new(&mut headers);
+        inter_response_info
+            .parse(response_buffer.as_bytes())
+            .expect("Can't parse response");
+        let reason = {
+            match inter_response_info.reason {
+                Some(reason) => reason,
+                None => "None",
+            }
+        };
+        if let Some(code) = inter_response_info.code {
+            match code / 100 {
+                1 => todo!("Not implemented for {code}"),
+                2 => {
+                    let mut json_type = false;
+                    for i in 0..headers.len() {
+                        if headers[i].name == "Content-Type" {
+                            let mut value = headers[i].value;
+                            let mut header_value_buf = String::with_capacity(value.len());
+                            std::io::Read::read_to_string(&mut value, &mut header_value_buf)
+                                .unwrap();
+                            json_type = header_value_buf.contains("application/json");
+                            break;
+                        }
+                    }
+                    break 'redirect_loop (response_buffer, json_type);
+                }
+                3 => {
+                    println!("Redirect: {code}");
+                    let headers = &mut *inter_response_info.headers;
+                    'find_location: for i in 0..headers.len() {
+                        if headers[i].name == "Location" {
+                            url.clear();
+                            std::io::Read::read_to_string(&mut headers[i].value, &mut url).unwrap();
+                            if url.starts_with("/") {
+                                url = format!("{scheme}://{host}{url}");
+                            }
+                            break 'find_location;
+                        }
+                    }
+                }
+                4 => {
+                    println!("Client side error: {code}\n Reason: {reason}");
+                    return None;
+                }
+                5 => {
+                    println!("Server side error: {code}\n Reason: {reason}");
+                    return None;
+                }
+                _ => (),
+            }
+        } else {
+            println!("Invalid response");
+            return None;
+        }
+        redirections += 1;
+        if redirections > MAX_REDIRECTIONS {
+            return None;
+        }
+    };
+    return Some((response_body, json_type));
+}
+
+fn display_url(url: &String, cache: &mut Option<CacheDirectory>) {
+    let mut url = if !url.starts_with("https") {
+        if url.starts_with("www") {
+            "https://".to_owned() + url
+        } else {
+            "https://www.".to_owned() + url
+        }
+    } else {
+        url.to_owned()
+    };
+
     println!("Accessing {}", url);
     match cache {
-        Some(unrwapped_cache) => {
+        Some(unwrapped_cache) => {
             println!("Cache directory present");
-            match unrwapped_cache.get_cache(&url) {
+            match unwrapped_cache.get_cache(&url) {
                 Some(content) => {
                     println!("Retrieving cached data\n{}", content);
+                    return;
                 }
-                None => {
-                    get_request(&url, cache).await;
-                }
+                None => (),
             }
         }
-        None => {
-            get_request(&url, cache).await;
+        None => (),
+    }
+
+    if let Some((response_body, json_type)) = get_request(&url) {
+        if !json_type {
+            let response_body_start =
+            response_body.find("\r\n\r\n").expect("Invalid response");
+            let response_body = response_body[response_body_start..]
+            .to_owned()
+            .trim()
+            .to_string();
+
+            let html = scraper::Html::parse_document(&response_body);
+            let tags: HashSet<&str> = HashSet::from_iter(
+                vec![
+                    "h1", "h2", "h3", "h4", "h5", "h6", "span", "p", "img", "a", "button",
+                ]
+                .into_iter(),
+            );
+
+            let element_vector = query_html(&html, tags);
+            let mut html_text_builder: StringBuilder = StringBuilder::new();
+            for element_ref in element_vector.iter() {
+                let element = element_ref.value();
+                match element.name() {
+                    "a" => match element.attr("href") {
+                        Some(link) => {
+                            let _name = {
+                                let mut name: String = String::new();
+                                for element_text in element_ref.text() {
+                                    let element_text = element_text.trim();
+                                    name.push_str(element_text);
+                                }
+                                if name.len() != 0 {
+                                    name = "(".to_owned() + &name + ")";
+                                }
+                                name
+                            };
+                            html_text_builder.append_line(
+                                format!("Link: {_name} \"{}\"", validate_link(&url, link)).as_str(),
+                            );
+                        }
+                        None => (),
+                    },
+                    "img" => match element.attr("src") {
+                        Some(link) => {
+                            html_text_builder.append_line(
+                                format!("Image: \"{}\"", validate_link(&url, link)).as_str(),
+                            );
+                        }
+                        None => (),
+                    },
+                    _name => {
+                        for element_text in element_ref.text() {
+                            let element_text = element_text.trim();
+                            html_text_builder.append_line(element_text);
+                        }
+                    }
+                }
+            }
+
+            let html_text = html_text_builder.get_string();
+            match cache {
+                Some(cache) => {
+                    cache
+                        .store_cache(&url, &html_text)
+                        .expect("Failed to store cache");
+                }
+                None => (),
+            }
+            println!("{}", html_text);
+        } else {
+            match cache {
+                Some(cache) => {
+                    cache
+                        .store_cache(&url, &response_body)
+                        .expect("Failed to store cache");
+                }
+                None => (),
+            }
+            println!("{}", response_body);
         }
+    } else {
+        println!("Error occured");
     }
 }
 
@@ -277,12 +391,16 @@ struct LinkResults(Vec<String>);
 
 const JSON_RESULTS_PATH: &'static str = "cache/search_results.json";
 
-async fn search_url(search_text: &String) {
+fn search_url(search_text: &String) {
     let url = "https://google.com/search?q=".to_string() + search_text;
-    let response = reqwest::get(url).await.expect("Request timed out");
-
-    let body = response.text().await.expect("Failed to parse the response");
-    // println!("{}", body);
+    dbg!(&url);
+    let body = if let Some((body, _)) = get_request(&url) {
+        body
+    } else {
+        println!("Search engine failed");
+        return;
+    };
+    println!("{}", body);
     let html = scraper::Html::parse_document(&body);
     let tags: HashSet<&str> = HashSet::from_iter(vec!["a"].into_iter());
     let element_vector = query_html(&html, tags);
@@ -318,7 +436,7 @@ async fn search_url(search_text: &String) {
         .expect("Cannot save results in json file.");
 }
 
-async fn get_previous(index: usize, cache: &mut Option<CacheDirectory>) {
+fn get_previous(index: usize, cache: &mut Option<CacheDirectory>) {
     let mut json_file =
         File::open(Path::new(JSON_RESULTS_PATH)).expect("No previous search results found");
     let mut json: String = String::new();
@@ -331,7 +449,7 @@ async fn get_previous(index: usize, cache: &mut Option<CacheDirectory>) {
     let link = link_results
         .get(index)
         .expect("No link results with such index found");
-    display_url(link, cache).await;
+    display_url(link, cache);
 }
 
 const HELP_MESSAGE: &'static str = 
@@ -356,26 +474,23 @@ async fn main() {
         }
         "-u" => {
             let url = args.get(2).expect("URL expected after -u");
-            let future = display_url(url, &mut cache);
-            block_on(future);
+            display_url(url, &mut cache);
         }
         "-s" => {
             let search_text = args.get(2).expect("Search term expect after -s");
-            let future = search_url(search_text);
-            block_on(future);
+            search_url(search_text);
         }
         "-p" => {
             let search_text = args
                 .get(2)
                 .expect("Index of the search result expected after -p");
-            let future = get_previous(
+            get_previous(
                 search_text
                     .trim()
                     .parse::<usize>()
                     .expect(format!("Number expected, found {}", search_text).as_str()),
                 &mut cache,
             );
-            block_on(future);
         }
         invalid_input => {
             println!(

@@ -416,12 +416,15 @@ dependencies = [
  "fs",
  "futures 0.3.30",
  "http",
+ "httparse",
  "linked_hash_set",
+ "native-tls",
  "reqwest",
  "scraper",
  "serde",
  "serde_json",
  "tokio",
+ "url",
 ]
 
 [[package]]

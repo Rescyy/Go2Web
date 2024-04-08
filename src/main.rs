@@ -1,5 +1,3 @@
-use futures::executor::block_on;
-use reqwest::header::{ACCEPT, USER_AGENT};
 use scraper::{ElementRef, Html};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -12,7 +10,7 @@ use std::{
     net::TcpStream,
     path::Path,
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
 
 // https://gist.github.com/strdr4605/b5c97f5268c56e01c1ee9ed9cba76abb
 
@@ -136,7 +134,7 @@ impl CacheDirectory {
 
 fn write_request(stream: &mut dyn Write, host: &str, path: &str) -> Result<(), Box<dyn Error>> {
     let request = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nUser-Agent: go2web-client\r\nAccept: text/html, application/json; charset=utf-8\r\nAccept-Language: en-US\r\nCache-Control: no-cache; max-age=0\r\n\r\n",
+        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nAccept: text/html, application/json; charset=utf-8\r\nCache-Control: no-cache; max-age=0\r\n\r\n",
         path, host
     );
     stream.write_all(request.as_bytes())?;
@@ -148,24 +146,26 @@ fn read_response(stream: &mut dyn Read) -> Result<String, Box<dyn Error>> {
     let mut buf: [u8; 1] = [0];
 
     let result = stream.read_to_string(&mut response);
-    if let Ok(_) = result {
-        return Ok(response);
-    } else {
-        response.clear();
-        println!("utf-8 problem");
-        loop {
-            match stream.read_exact(&mut buf) {
-                Err(_err) => {
-                    break;
-                },
-                _ => (),
-            }
+    return match result {
+        Ok(_) => Ok(response),
+        Err(err) => {
+            println!("{err}");
+            response.clear();
+            println!("utf-8 problem");
+            loop {
+                match stream.read_exact(&mut buf) {
+                    Err(_err) => {
+                        break;
+                    },
+                    _ => (),
+                }
 
-            response.push(char::from_u32(buf[0] as u32).unwrap());
-            // dbg!(&response);
-        }
-        Ok(response)
-    }
+                response.push(char::from_u32(buf[0] as u32).unwrap());
+                // dbg!(&response);
+            }
+            Ok(response)
+        },
+    };
 }
 
 fn get_request(arg_url: &String) -> Option<(String, bool)> {
@@ -210,7 +210,7 @@ fn get_request(arg_url: &String) -> Option<(String, bool)> {
             write_request(&mut stream, host, path).unwrap();
             read_response(&mut stream).unwrap()
         };
-        dbg!(&response_buffer);
+        // dbg!(&response_buffer);
         let mut headers = [httparse::EMPTY_HEADER; 64];
         let mut inter_response_info;
         inter_response_info = httparse::Response::new(&mut headers);
@@ -277,7 +277,7 @@ fn get_request(arg_url: &String) -> Option<(String, bool)> {
 }
 
 fn display_url(url: &String, cache: &mut Option<CacheDirectory>) {
-    let mut url = if !url.starts_with("https") {
+    let url = if !url.starts_with("https") {
         if url.starts_with("www") {
             "https://".to_owned() + url
         } else {
@@ -391,21 +391,16 @@ struct LinkResults(Vec<String>);
 
 const JSON_RESULTS_PATH: &'static str = "cache/search_results.json";
 
-fn search_url(search_text: &String) {
+async fn search_url(search_text: &String) {
     let url = "https://google.com/search?q=".to_string() + search_text;
-    dbg!(&url);
-    let body = if let Some((body, _)) = get_request(&url) {
-        body
-    } else {
-        println!("Search engine failed");
-        return;
-    };
-    println!("{}", body);
+    let response = reqwest::get(url).await.expect("Request timed out");
+
+    let body = response.text().await.expect("Failed to parse the response");
+    // println!("{}", body);
     let html = scraper::Html::parse_document(&body);
     let tags: HashSet<&str> = HashSet::from_iter(vec!["a"].into_iter());
     let element_vector = query_html(&html, tags);
     let mut search_results: Vec<(String, String)> = Vec::new();
-    let google = "https://www.google.com".to_string();
     for element_ref in element_vector.iter() {
         match element_ref.attr("href") {
             Some(link) => {
@@ -414,7 +409,7 @@ fn search_url(search_text: &String) {
                     for element in element_ref.text() {
                         text.push_str(element);
                     }
-                    search_results.push((validate_link(&google, link), text));
+                    search_results.push((link[7..].to_owned(), text));
                 }
             }
             _ => (),
@@ -436,7 +431,7 @@ fn search_url(search_text: &String) {
         .expect("Cannot save results in json file.");
 }
 
-fn get_previous(index: usize, cache: &mut Option<CacheDirectory>) {
+async fn get_previous(index: usize, cache: &mut Option<CacheDirectory>) {
     let mut json_file =
         File::open(Path::new(JSON_RESULTS_PATH)).expect("No previous search results found");
     let mut json: String = String::new();
@@ -449,6 +444,7 @@ fn get_previous(index: usize, cache: &mut Option<CacheDirectory>) {
     let link = link_results
         .get(index)
         .expect("No link results with such index found");
+    // dbg!(link);
     display_url(link, cache);
 }
 
@@ -478,7 +474,7 @@ async fn main() {
         }
         "-s" => {
             let search_text = args.get(2).expect("Search term expect after -s");
-            search_url(search_text);
+            search_url(search_text).await;
         }
         "-p" => {
             let search_text = args
@@ -490,7 +486,7 @@ async fn main() {
                     .parse::<usize>()
                     .expect(format!("Number expected, found {}", search_text).as_str()),
                 &mut cache,
-            );
+            ).await;
         }
         invalid_input => {
             println!(
